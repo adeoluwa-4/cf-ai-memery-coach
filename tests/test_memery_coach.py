@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from memery_coach import MemeryCoach
@@ -73,6 +74,49 @@ class MemeryCoachTests(unittest.TestCase):
             lesson, count = coach.most_repeated_lesson()
             self.assertEqual(lesson, "start before I feel ready")
             self.assertEqual(count, 2)
+
+    def test_complete_last_recall_updates_schedule(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_file = Path(tmp) / "memories.json"
+            coach = MemeryCoach(data_file=data_file)
+            coach.add_memory(
+                title="Morning planning",
+                details="I organized my tasks",
+                feeling="clear",
+                lesson="pick one priority first",
+                tags=["planning"],
+            )
+
+            coach.recall_prompt()
+            message = coach.complete_last_recall(remembered=True)
+            self.assertIn("Next review", message)
+            self.assertEqual(coach.memories[0].review_count, 1)
+            self.assertTrue(coach.memories[0].next_review_at)
+            next_review = datetime.fromisoformat(coach.memories[0].next_review_at)
+            self.assertGreater(next_review, datetime.now())
+
+    def test_search_memories_returns_best_matches(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            data_file = Path(tmp) / "memories.json"
+            coach = MemeryCoach(data_file=data_file)
+            coach.add_memory(
+                title="Public speaking practice",
+                details="I practiced speaking before my team demo",
+                feeling="nervous",
+                lesson="slow down and breathe",
+                tags=["career", "communication"],
+            )
+            coach.add_memory(
+                title="Dinner prep",
+                details="I cooked at home",
+                feeling="relaxed",
+                lesson="plan ingredients early",
+                tags=["home"],
+            )
+
+            matches = coach.search_memories("speaking at work")
+            self.assertGreater(len(matches), 0)
+            self.assertEqual(matches[0].title, "Public speaking practice")
 
 
 if __name__ == "__main__":

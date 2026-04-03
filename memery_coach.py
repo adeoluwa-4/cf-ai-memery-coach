@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from collections import Counter
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -32,12 +32,30 @@ class Memory:
     feeling: str
     lesson: str
     tags: list[str]
+    review_count: int = 0
+    last_reviewed_at: str = ""
+    next_review_at: str = ""
+
+    @classmethod
+    def from_dict(cls, raw: dict[str, Any]) -> "Memory":
+        return cls(
+            created_at=str(raw.get("created_at", "")),
+            title=str(raw.get("title", "")),
+            details=str(raw.get("details", "")),
+            feeling=str(raw.get("feeling", "")),
+            lesson=str(raw.get("lesson", "")),
+            tags=list(raw.get("tags", [])),
+            review_count=int(raw.get("review_count", 0)),
+            last_reviewed_at=str(raw.get("last_reviewed_at", "")),
+            next_review_at=str(raw.get("next_review_at", "")),
+        )
 
 
 class MemeryCoach:
     def __init__(self, data_file: Path = DATA_FILE) -> None:
         self.data_file = data_file
         self.memories: list[Memory] = []
+        self._last_recall_index: int | None = None
         self._load()
 
     def _load(self) -> None:
@@ -48,7 +66,7 @@ class MemeryCoach:
         with self.data_file.open("r", encoding="utf-8") as f:
             raw = json.load(f)
 
-        self.memories = [Memory(**item) for item in raw]
+        self.memories = [Memory.from_dict(item) for item in raw]
 
     def _save(self) -> None:
         self.data_file.parent.mkdir(parents=True, exist_ok=True)
@@ -63,13 +81,17 @@ class MemeryCoach:
         lesson: str,
         tags: list[str],
     ) -> Memory:
+        now = datetime.now().isoformat(timespec="seconds")
         memory = Memory(
-            created_at=datetime.now().isoformat(timespec="seconds"),
+            created_at=now,
             title=title.strip(),
             details=details.strip(),
             feeling=feeling.strip(),
             lesson=lesson.strip(),
             tags=[t.strip().lower() for t in tags if t.strip()],
+            review_count=0,
+            last_reviewed_at="",
+            next_review_at=now,
         )
         self.memories.append(memory)
         self._save()
@@ -125,6 +147,8 @@ class MemeryCoach:
             return []
 
         question_tokens = self._tokens(question)
+        if not question_tokens:
+            return self.list_recent(limit=limit)
         scored: list[tuple[float, Memory]] = []
         total = len(self.memories)
 
@@ -132,6 +156,8 @@ class MemeryCoach:
             memory_tokens = self._tokens(self._memory_blob(memory))
             overlap = len(question_tokens.intersection(memory_tokens))
             tag_hits = len(question_tokens.intersection(set(memory.tags)))
+            if overlap == 0 and tag_hits == 0:
+                continue
             recency_bonus = index / max(total, 1)
             score = (overlap * 2.0) + (tag_hits * 1.5) + recency_bonus
             if score > 0:
@@ -142,6 +168,12 @@ class MemeryCoach:
 
         scored.sort(key=lambda item: item[0], reverse=True)
         return [memory for _, memory in scored[:limit]]
+
+    def search_memories(self, query: str, limit: int = 10) -> list[Memory]:
+        query = query.strip()
+        if not query:
+            return []
+        return self.relevant_memories(query, limit=limit)
 
     def most_repeated_lesson(self) -> tuple[str, int]:
         lessons = [m.lesson.strip() for m in self.memories if m.lesson.strip()]
@@ -195,18 +227,71 @@ class MemeryCoach:
 
     def recall_prompt(self) -> tuple[str, str]:
         if not self.memories:
+            self._last_recall_index = None
             return (
                 "No memories available for recall.",
                 "Add a memory first.",
             )
 
-        memory = random.choice(self.memories)
+        due_indexes = self._due_memory_indexes()
+        if due_indexes:
+            index = due_indexes[0]
+            memory = self.memories[index]
+        else:
+            index = random.randrange(len(self.memories))
+            memory = self.memories[index]
+
+        self._last_recall_index = index
         question = (
             "Recall check\n"
             f"When you wrote '{memory.title}', what lesson did you capture?"
         )
         answer = f"Saved lesson: {memory.lesson or 'No lesson was saved for this one.'}"
         return question, answer
+
+    @staticmethod
+    def _parse_iso(value: str) -> datetime | None:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+
+    def _due_memory_indexes(self) -> list[int]:
+        now = datetime.now()
+        due: list[tuple[datetime, int]] = []
+        for index, memory in enumerate(self.memories):
+            next_review = self._parse_iso(memory.next_review_at)
+            if next_review is None or next_review <= now:
+                # Oldest due item first so we review neglected items.
+                reference = next_review or datetime.min
+                due.append((reference, index))
+        due.sort(key=lambda item: item[0])
+        return [index for _, index in due]
+
+    def complete_last_recall(self, remembered: bool) -> str:
+        index = getattr(self, "_last_recall_index", None)
+        if index is None or index >= len(self.memories):
+            return "No recall session is active."
+
+        memory = self.memories[index]
+        now = datetime.now()
+        intervals = [1, 3, 7, 14, 30, 45]
+
+        if remembered:
+            memory.review_count += 1
+            step = min(memory.review_count - 1, len(intervals) - 1)
+            next_days = intervals[step]
+        else:
+            memory.review_count = max(memory.review_count - 1, 0)
+            next_days = 1
+
+        memory.last_reviewed_at = now.isoformat(timespec="seconds")
+        memory.next_review_at = (now + timedelta(days=next_days)).isoformat(timespec="seconds")
+        self._save()
+        self._last_recall_index = None
+        return f"Next review for '{memory.title}' is in {next_days} day(s)."
 
     def coaching_context(self, limit: int = 8) -> str:
         recent = self.list_recent(limit=limit)
@@ -369,7 +454,8 @@ def run_cli() -> int:
         print("3 View summary")
         print("4 Recall practice")
         print("5 Ask coach")
-        print("6 Exit")
+        print("6 Search memories")
+        print("7 Exit")
 
         choice = prompt("Choice: ")
 
@@ -404,6 +490,8 @@ def run_cli() -> int:
             print(q)
             input("Press enter to reveal the saved lesson.")
             print(a)
+            remembered = prompt("Did you remember it well? (y/n): ", allow_empty=True).lower()
+            print(coach.complete_last_recall(remembered.startswith("y")))
 
         elif choice == "5":
             question = prompt("Ask your coaching question: ")
@@ -411,11 +499,25 @@ def run_cli() -> int:
             print(coach.ask_ai_coach(question))
 
         elif choice == "6":
+            query = prompt("Search query: ")
+            matches = coach.search_memories(query, limit=10)
+            if not matches:
+                print("No matches found.")
+                continue
+            for m in matches:
+                print()
+                print(f"Date: {m.created_at}")
+                print(f"Title: {m.title}")
+                print(f"Feeling: {m.feeling}")
+                print(f"Lesson: {m.lesson}")
+                print(f"Tags: {', '.join(m.tags) if m.tags else 'none'}")
+
+        elif choice == "7":
             print("See you next time.")
             return 0
 
         else:
-            print("Please choose a number from 1 to 6.")
+            print("Please choose a number from 1 to 7.")
 
 
 def main() -> None:

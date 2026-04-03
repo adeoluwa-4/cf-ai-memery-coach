@@ -8,15 +8,17 @@ If you add an OpenAI API key, it can also answer with live AI coaching.
 
 1. Saves memory entries with title, details, feeling, lesson, and tags.
 2. Stores your data in a local JSON file.
-3. Shows a quick summary of your recent patterns.
-4. Runs recall practice so you remember your own lessons.
-5. Answers coaching questions with local logic or OpenAI.
+3. Finds relevant memories when you ask a question.
+4. Shows trend signals from repeated lessons and feelings.
+5. Runs adaptive recall timing so hard lessons come back sooner.
+6. Lets you search your memories by keywords.
+7. Answers coaching questions with local logic or OpenAI.
 
 ## How to run
 
 1. Open a terminal in this folder.
 2. Run `python3 memery_coach.py`.
-3. Follow the menu.
+3. Use the menu options to save, search, reflect, and review.
 
 ## Optional OpenAI setup
 
