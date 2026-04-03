@@ -9,10 +9,11 @@ from __future__ import annotations
 import json
 import os
 import random
-import sys
+import re
 import textwrap
 import urllib.error
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
@@ -84,6 +85,86 @@ class MemeryCoach:
                 counts[tag] = counts.get(tag, 0) + 1
         return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
 
+    @staticmethod
+    def _tokens(text: str) -> set[str]:
+        words = set(re.findall(r"[a-zA-Z0-9']+", text.lower()))
+        stop_words = {
+            "the",
+            "and",
+            "for",
+            "with",
+            "that",
+            "this",
+            "from",
+            "you",
+            "your",
+            "are",
+            "was",
+            "have",
+            "had",
+            "what",
+            "when",
+            "where",
+            "how",
+            "why",
+            "into",
+            "about",
+            "today",
+            "then",
+        }
+        return {w for w in words if len(w) > 2 and w not in stop_words}
+
+    @staticmethod
+    def _memory_blob(memory: Memory) -> str:
+        return " ".join(
+            [memory.title, memory.details, memory.feeling, memory.lesson, " ".join(memory.tags)]
+        )
+
+    def relevant_memories(self, question: str, limit: int = 3) -> list[Memory]:
+        if not self.memories:
+            return []
+
+        question_tokens = self._tokens(question)
+        scored: list[tuple[float, Memory]] = []
+        total = len(self.memories)
+
+        for index, memory in enumerate(self.memories, start=1):
+            memory_tokens = self._tokens(self._memory_blob(memory))
+            overlap = len(question_tokens.intersection(memory_tokens))
+            tag_hits = len(question_tokens.intersection(set(memory.tags)))
+            recency_bonus = index / max(total, 1)
+            score = (overlap * 2.0) + (tag_hits * 1.5) + recency_bonus
+            if score > 0:
+                scored.append((score, memory))
+
+        if not scored:
+            return self.list_recent(limit=limit)
+
+        scored.sort(key=lambda item: item[0], reverse=True)
+        return [memory for _, memory in scored[:limit]]
+
+    def most_repeated_lesson(self) -> tuple[str, int]:
+        lessons = [m.lesson.strip() for m in self.memories if m.lesson.strip()]
+        if not lessons:
+            return ("", 0)
+        counts = Counter(lessons)
+        lesson, count = counts.most_common(1)[0]
+        return (lesson, count)
+
+    def feeling_trend(self, limit: int = 7) -> list[str]:
+        if not self.memories:
+            return []
+
+        recent = self.memories[-limit:]
+        tokens: list[str] = []
+        for memory in recent:
+            parts = re.findall(r"[a-zA-Z']+", memory.feeling.lower())
+            if parts:
+                tokens.append(parts[0])
+
+        counts = Counter(tokens)
+        return [name for name, _ in counts.most_common(3)]
+
     def summary(self) -> str:
         if not self.memories:
             return "You do not have memories saved yet. Add one to start coaching."
@@ -91,6 +172,8 @@ class MemeryCoach:
         tag_counts = self.tag_counts()
         top_tags = list(tag_counts.keys())[:3]
         last = self.memories[-1]
+        top_feelings = self.feeling_trend(limit=7)
+        repeated_lesson, lesson_count = self.most_repeated_lesson()
 
         lines = [
             f"You have saved {len(self.memories)} memories.",
@@ -100,9 +183,13 @@ class MemeryCoach:
         if top_tags:
             lines.append(f"Top themes: {', '.join(top_tags)}.")
 
-        lessons = [m.lesson for m in self.memories if m.lesson]
-        if lessons:
-            lines.append(f"Repeat this lesson today: {lessons[-1]}")
+        if top_feelings:
+            lines.append(f"Recent feeling trend: {', '.join(top_feelings)}.")
+
+        if lesson_count > 1:
+            lines.append(f"Most repeated lesson: {repeated_lesson}")
+        elif last.lesson:
+            lines.append(f"Repeat this lesson today: {last.lesson}")
 
         return "\n".join(lines)
 
@@ -155,6 +242,7 @@ class MemeryCoach:
         user_content = (
             "User memory log:\n"
             f"{self.coaching_context()}\n\n"
+            f"Most relevant memories for this question:\n{self._relevant_context(question)}\n\n"
             f"User question: {question}"
         )
 
@@ -212,6 +300,17 @@ class MemeryCoach:
                     parts.append(content.get("text", ""))
         return "\n".join(p for p in parts if p).strip()
 
+    def _relevant_context(self, question: str) -> str:
+        relevant = self.relevant_memories(question, limit=3)
+        if not relevant:
+            return "No memories found."
+        chunks: list[str] = []
+        for memory in relevant:
+            chunks.append(
+                f"{memory.created_at} | {memory.title} | feeling: {memory.feeling} | lesson: {memory.lesson}"
+            )
+        return "\n".join(chunks)
+
     def local_coach_response(self, question: str) -> str:
         if not self.memories:
             return (
@@ -222,17 +321,30 @@ class MemeryCoach:
         tags = self.tag_counts()
         top = next(iter(tags), "growth")
         last = self.memories[-1]
-        action = (
-            f"Action for today: spend 10 minutes on one task tied to '{top}', "
-            "then write one sentence about what changed."
-        )
+        relevant = self.relevant_memories(question, limit=3)
+        repeated_lesson, lesson_count = self.most_repeated_lesson()
+
+        if relevant:
+            anchors = ", ".join(f"'{m.title}'" for m in relevant[:2])
+        else:
+            anchors = f"'{last.title}'"
+
+        if lesson_count > 1:
+            lesson_line = f"Recurring lesson to apply: {repeated_lesson}"
+        else:
+            lesson_line = (
+                f"Recent lesson to apply: {last.lesson or 'Name one clear lesson from that moment.'}"
+            )
 
         return (
             f"Question: {question}\n\n"
-            f"Pattern I see: your latest memory focused on '{last.title}' and felt '{last.feeling}'.\n"
+            f"Pattern I see: your strongest related memories are {anchors}.\n"
             f"Likely theme: {top}.\n"
-            f"Recent lesson to apply: {last.lesson or 'Name one clear lesson from that moment.'}\n"
-            f"{action}"
+            f"{lesson_line}\n"
+            f"Action for today:\n"
+            f"1. Spend 10 minutes on one task tied to '{top}'.\n"
+            f"2. Reuse this cue from your log: {anchors}.\n"
+            f"3. Write one sentence tonight about what improved."
         )
 
 
